@@ -51,6 +51,7 @@ logger.addHandler(handler)
 
 # Import things we are exporting
 from .assign import Assign
+from .assign_pulp import AssignPulp
 from .tasking import Tasking
 from .environment import Environment
 from .employee import Employee
