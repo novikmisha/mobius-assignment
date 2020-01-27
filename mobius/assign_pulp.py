@@ -249,32 +249,18 @@ class AssignPulp():
 
             workday_start += timedelta(days=1)
 
-#m.update()
         m += obj
-#        m.modelSense = GRB.MAXIMIZE  # Make something people love!
 
-#if return_unsolved_model_for_tuning:
-#            return m
 
         status = m.solve(solver = GLPK_CMD())
-        print(str(status))
-    '''
-        if m.status != GRB.status.OPTIMAL:
-            logger.info("Calculation failed - gurobi status code %s" %
-                        m.status)
-            raise Exception("Calculation failed")
-
-        logger.info("Optimized! objective: %s" % m.objVal)
-
         for e in self.employees:
-            if min_week_hours_violation[e.user_id].x > .5:
+            if pulp.value(min_week_hours_violation[e.user_id]) > .5:
                 logger.info(
-                    "User %s unable to meet min hours for week (hours: %s, min: %s)"
-                    % (e.user_id, 1.0 * week_minutes_sum[e.user_id].x /
-                       MINUTES_PER_HOUR, e.min_hours_per_workweek))
+                    "User %s unable to meet min hours for week" % (e.user_id))
+
 
             for s in self.shifts:
-                if assignments[e.user_id, s.shift_id].x > .5:
+                if pulp.value(assignments[e.user_id, s.shift_id]) > .5:
                     logger.info("User %s assigned shift %s" %
                                 (e.user_id, s.shift_id))
                     s.user_id = e.user_id
@@ -282,4 +268,3 @@ class AssignPulp():
         logger.info("%s shifts of %s still unsassigned" %
                     (len([s for s in self.shifts if s.user_id == 0]),
                      len(self.shifts)))
-        '''
