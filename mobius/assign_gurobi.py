@@ -3,7 +3,6 @@ from copy import deepcopy
 import os
 
 import staffjoy
-from pulp import *
 
 from mobius.helpers import dt_overlaps, week_day_range, dt_to_day
 from mobius.constants import MINUTES_PER_HOUR
@@ -13,7 +12,7 @@ tune_file = os.path.dirname(os.path.realpath(
     __file__)) + "/../" + config.TUNE_FILE
 
 
-class AssignPulp():
+class AssignGurobi():
     """Assigns workers to shifts"""
 
     # core math
@@ -84,27 +83,28 @@ class AssignPulp():
 
         # Import Guorbi now so server connection doesn't go stale
         # (importing triggers a server connection)
-#import gurobipy as grb
-#GRB = grb.GRB  # For easier constant access
+        import gurobipy as grb
+        GRB = grb.GRB  # For easier constant access
 
-#m = grb.Model("mobius-%s-role-%s" %
-#                      (config.ENV, self.environment.role_id))
-        m = LpProblem("The Whiskas Problem",LpMaximize)
-#        m.setParam("OutputFlag", False)  # Don't print gurobi logs
-#        m.setParam("Threads", config.THREADS)
+        m = grb.Model("mobius-%s-role-%s" %
+                      (config.ENV, self.environment.role_id))
+        m.setParam("OutputFlag", False)  # Don't print gurobi logs
+        m.setParam("Threads", config.THREADS)
 
         # Add Timeout on happiness scoring.
-#        if happiness_scoring:
-#            m.setParam("TimeLimit", config.HAPPY_CALCULATION_TIMEOUT)
+        if happiness_scoring:
+            m.setParam("TimeLimit", config.HAPPY_CALCULATION_TIMEOUT)
+
         # Try loading a tuning file if we're not tuning
-#if not return_unsolved_model_for_tuning:
-#            try:
-#                m.read(tune_file)
-#                logger.info("Loaded tuned model")
-#            except:
-#                logger.info("No tune file found")
+        if not return_unsolved_model_for_tuning:
+            try:
+                m.read(tune_file)
+                logger.info("Loaded tuned model")
+            except:
+                logger.info("No tune file found")
+
         # Create objective - which is basically happiness minus penalties
-        obj = 0
+        obj = grb.LinExpr()
 
         # Whether worker is assigned to shift
         assignments = {}
@@ -112,8 +112,9 @@ class AssignPulp():
         for e in self.employees:
             logger.debug("Building shifts for user %s" % e.user_id)
             for s in self.shifts:
-                assignments[e.user_id, s.shift_id] = LpVariable(
-                    "user-%s-assigned-shift-%s" % (e.user_id, s.shift_id), 0, 1, cat='Integer')
+                assignments[e.user_id, s.shift_id] = m.addVar(
+                    vtype=GRB.BINARY,
+                    name="user-%s-assigned-shift-%s" % (e.user_id, s.shift_id))
 
                 # Only add happiness if we're scoring happiness
                 if happiness_scoring:
@@ -121,18 +122,10 @@ class AssignPulp():
                                        s.shift_id] * e.shift_happiness_score(s)
 
                 # Also add an unassigned shift - and penalize it!
-#                unassigned[s.shift_id] = LpVariable(
-#                                                  "unassigned-shift-%s" %
-#                                                  s.shift_id, 0, 1, cat='Integer')
-#                obj += unassigned[s.shift_id] * config.UNASSIGNED_PENALTY
-
-        for s in self.shifts:
-           # Also add an unassigned shift - and penalize it!
-            unassigned[s.shift_id] = LpVariable(
-                                              "unassigned-shift-%s" %
-                                              s.shift_id, 0, 1, cat='Integer')
-            obj += unassigned[s.shift_id] * config.UNASSIGNED_PENALTY
-
+                unassigned[s.shift_id] = m.addVar(vtype=GRB.BINARY,
+                                                  name="unassigned-shift-%s" %
+                                                  s.shift_id)
+                obj += unassigned[s.shift_id] * config.UNASSIGNED_PENALTY
 
         # Helper variables
         min_week_hours_violation = {}
@@ -140,27 +133,32 @@ class AssignPulp():
         day_shifts_sum = {}
         day_active = {}
         for e in self.employees:
-            min_week_hours_violation[e.user_id] = LpVariable(
-                "user-%s-min-week-hours-violation" % (e.user_id), 0, 1, cat='Integer')
+            min_week_hours_violation[e.user_id] = m.addVar(
+                vtype=GRB.BINARY,
+                name="user-%s-min-week-hours-violation" % (e.user_id))
 
-            week_minutes_sum[e.user_id] = LpVariable(
+            week_minutes_sum[e.user_id] = m.addVar(
                 name="user-%s-hours-per-week" % e.user_id)
 
             for day in week_day_range():
-                day_shifts_sum[e.user_id, day] = LpVariable(
-                    cat='Integer',
+                day_shifts_sum[e.user_id, day] = m.addVar(
+                    vtype=GRB.INTEGER,
                     name="user-%s-day-%s-shift-sum" % (e.user_id, day))
 
-                day_active[e.user_id, day] = LpVariable(
-                    "user-%s-day-%s-shift-sum" % (e.user_id, day), 0, 1, cat='Integer')
+                day_active[e.user_id, day] = m.addVar(
+                    vtype=GRB.BINARY,
+                    name="user-%s-day-%s-shift-sum" % (e.user_id, day))
 
             obj += min_week_hours_violation[
                 e.user_id] * config.MIN_HOURS_VIOLATION_PENALTY
 
-#        m.update()
+        m.update()
 
         for s in self.shifts:
-            m += lpSum(assignments[e.user_id, s.shift_id] for e in self.employees) + unassigned[s.shift_id] == 1
+            m.addConstr(
+                grb.quicksum(assignments[e.user_id, s.shift_id]
+                             for e in self.employees) + unassigned[s.shift_id],
+                GRB.EQUAL, 1)
 
         # Allowed shift state transitions
         for test in self.shifts:
@@ -180,7 +178,9 @@ class AssignPulp():
 
                     # Add constraint that shift transitions not allowed
                     for e in self.employees:
-                        m += assignments[e.user_id, test.shift_id] + assignments[e.user_id, o.shift_id] <= 1
+                        m.addConstr(assignments[e.user_id, test.shift_id] +
+                                    assignments[e.user_id, o.shift_id],
+                                    GRB.LESS_EQUAL, 1)
 
         # Add consecutive days off constraint
         # so that workers have a "weekend" - at least 2 consecutive
@@ -191,7 +191,7 @@ class AssignPulp():
         # to be a weighted variable.
         if consecutive_days_off:
             for e in self.employees:
-                day_off_sum = 0
+                day_off_sum = grb.LinExpr()
                 previous_day_name = None
                 for day in week_day_range(self.environment.day_week_starts):
                     if not previous_day_name:
@@ -209,7 +209,7 @@ class AssignPulp():
 
                 # We now have built the LinExpr. It needs to be >= 1
                 # (for at least 1 set of consec days off)
-                m += day_off_sum >= 1
+                m.addConstr(day_off_sum, GRB.GREATER_EQUAL, 1)
 
         # Availability constraints
         for e in self.employees:
@@ -217,22 +217,43 @@ class AssignPulp():
                 if not e.available_to_work(s):
                     logger.debug("User %s unavailable to work shift %s" %
                                  (e.user_id, s.shift_id))
-                    m += assignments[e.user_id, s.shift_id] == 0
+                    m.addConstr(assignments[e.user_id, s.shift_id], GRB.EQUAL,
+                                0)
 
         # Limit employee hours per workweek
         for e in self.employees:
 
             # The running total of shifts is equal to the helper variable
-            m += sum([s.total_minutes() * assignments[e.user_id, s.shift_id] for s in self.shifts]) == week_minutes_sum[e.user_id]
+            m.addConstr(
+                sum([s.total_minutes() * assignments[e.user_id, s.shift_id]
+                     for s in self.shifts]), GRB.EQUAL,
+                week_minutes_sum[e.user_id])
 
             # The total minutes an employee works in a week is less than or equal to their max
-            m += week_minutes_sum[e.user_id] <= e.max_hours_per_workweek * MINUTES_PER_HOUR
+            m.addConstr(week_minutes_sum[e.user_id], GRB.LESS_EQUAL,
+                        e.max_hours_per_workweek * MINUTES_PER_HOUR)
 
             # A worker must work at least their min hours per week. 
             # Violation causes a penalty.
             # NOTE - once the min is violated, we don't say "try to get as close as possible" - 
             # we stop unassigned shifts, but if you violate min then you're not guaranteed anything
-            m += week_minutes_sum[e.user_id] >= e.min_hours_per_workweek * MINUTES_PER_HOUR * (1 - min_week_hours_violation[e.user_id])
+            m.addConstr(week_minutes_sum[e.user_id], GRB.GREATER_EQUAL,
+                        e.min_hours_per_workweek * MINUTES_PER_HOUR *
+                        (1 - min_week_hours_violation[e.user_id]))
+
+            for day in week_day_range():
+                m.addSOS(GRB.SOS_TYPE1, [day_shifts_sum[e.user_id, day],
+                                         day_active[e.user_id, day]])
+                m.addConstr(day_shifts_sum[e.user_id, day], GRB.EQUAL,
+                            grb.quicksum([assignments[e.user_id, s.shift_id]
+                                          for s in self.shifts
+                                          if ((dt_to_day(s.start) == day) or (
+                                              dt_to_day(s.stop) == day and
+                                              s.stop <= self.environment.stop))
+                                          ]))
+
+                m.addConstr(day_shifts_sum[e.user_id, day] +
+                            day_active[e.user_id, day], GRB.GREATER_EQUAL, 1)
 
         # Limit employee hours per workday
         workday_start = deepcopy(self.environment.start)
@@ -240,27 +261,42 @@ class AssignPulp():
             for e in self.employees:
                 # Look for minutes of overlap
                 workday_stop = workday_start + timedelta(days=1)
-                m += sum([s.minutes_overlap(start=workday_start,
+                m.addConstr(
+                    sum([s.minutes_overlap(start=workday_start,
                                            stop=workday_stop) * assignments[
                                                e.user_id, s.shift_id]
                          for s in self.shifts
                          if dt_overlaps(s.start, s.stop, workday_start,
-                                        workday_stop)]) <= self.environment.max_minutes_per_workday
+                                        workday_stop)]),
+                    GRB.LESS_EQUAL,
+                    self.environment.max_minutes_per_workday)
 
             workday_start += timedelta(days=1)
 
-        m += obj
+        m.update()
+        m.setObjective(obj)
+        m.modelSense = GRB.MAXIMIZE  # Make something people love!
 
+        if return_unsolved_model_for_tuning:
+            return m
 
-        status = m.solve(solver = GLPK_CMD())
+        m.optimize()
+        if m.status != GRB.status.OPTIMAL:
+            logger.info("Calculation failed - gurobi status code %s" %
+                        m.status)
+            raise Exception("Calculation failed")
+
+        logger.info("Optimized! objective: %s" % m.objVal)
+
         for e in self.employees:
-            if pulp.value(min_week_hours_violation[e.user_id]) > .5:
+            if min_week_hours_violation[e.user_id].x > .5:
                 logger.info(
-                    "User %s unable to meet min hours for week" % (e.user_id))
-
+                    "User %s unable to meet min hours for week (hours: %s, min: %s)"
+                    % (e.user_id, 1.0 * week_minutes_sum[e.user_id].x /
+                       MINUTES_PER_HOUR, e.min_hours_per_workweek))
 
             for s in self.shifts:
-                if pulp.value(assignments[e.user_id, s.shift_id]) > .5:
+                if assignments[e.user_id, s.shift_id].x > .5:
                     logger.info("User %s assigned shift %s" %
                                 (e.user_id, s.shift_id))
                     s.user_id = e.user_id
